@@ -1,0 +1,1 @@
+memberSearchIndex = [{"p":"itensvisuais","c":"BaggingOptimized","l":"BaggingOptimized()","u":"%3Cinit%3E()"},{"p":"itensvisuais","c":"BaggingOptimized","l":"main(String[])","u":"main(java.lang.String[])"}];updateSearchResults();

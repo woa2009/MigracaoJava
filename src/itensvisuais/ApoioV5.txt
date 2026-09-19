@@ -1,0 +1,1488 @@
+/**
+ * Aplicação de Regressão Espectral com Otimização por Validação Cruzada.
+ *
+ * <p>Esta aplicação implementa e compara três técnicas de regressão aplicadas
+ * a dados espectrais:</p>
+ * <ul>
+ *   <li><b>RLM Simples</b> – Regressão Linear Múltipla padrão via pseudoinversa.</li>
+ *   <li><b>RLM + Bagging</b> – Ensemble com reamostragem com reposição (bootstrap completo).</li>
+ *   <li><b>RLM + Subagging</b> – Ensemble com reamostragem sem reposição (subconjunto aleatório).</li>
+ * </ul>
+ *
+ * <p>O protocolo metodológico segue três etapas:</p>
+ * <ol>
+ *   <li>Carregamento e validação dos dados de calibração e teste.</li>
+ *   <li>Otimização dos hiperparâmetros (número de bags {@code m} e fração {@code k})
+ *       via validação cruzada 5-fold aplicada apenas ao conjunto de calibração.</li>
+ *   <li>Avaliação final dos três modelos no conjunto de teste independente,
+ *       reportando RMSE, MAE, R² e tempo de execução.</li>
+ * </ol>
+ *
+ * <p>Dependências externas:</p>
+ * <ul>
+ *   <li>EJML ({@code org.ejml}) – operações matriciais e pseudoinversa.</li>
+ *   <li>JFreeChart ({@code org.jfree}) – geração de gráficos comparativos.</li>
+ * </ul>
+ *
+ * @author Wagner Oliveira de Araujo
+ * @version 1.1
+ */
+package itensvisuais;
+
+// Imports EJML
+import org.ejml.simple.SimpleMatrix;
+
+// Imports JFreeChart
+import org.jfree.chart.ChartFactory;
+import org.jfree.chart.ChartPanel;
+import org.jfree.chart.JFreeChart;
+import org.jfree.chart.plot.PlotOrientation;
+import org.jfree.chart.plot.XYPlot;
+import org.jfree.chart.renderer.xy.XYLineAndShapeRenderer;
+import org.jfree.data.xy.XYSeries;
+import org.jfree.data.xy.XYSeriesCollection;
+
+// Imports Swing
+import javax.swing.JFrame;
+import javax.swing.JTextField;
+import javax.swing.JTextArea;
+import javax.swing.JButton;
+import javax.swing.JPanel;
+import javax.swing.JLabel;
+import javax.swing.JScrollPane;
+import javax.swing.JFileChooser;
+import javax.swing.JOptionPane;
+import javax.swing.SwingUtilities;
+import javax.swing.SwingWorker;
+import javax.swing.border.EmptyBorder;
+import javax.swing.border.TitledBorder;
+
+// Imports AWT
+import java.awt.BorderLayout;
+import java.awt.GridLayout;
+import java.awt.FlowLayout;
+import java.awt.Font;
+import java.awt.Dimension;
+import java.awt.Color;
+import java.awt.BasicStroke;
+
+// Imports IO
+import java.io.File;
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.FileWriter;
+import java.io.PrintWriter;
+import java.io.IOException;
+
+// Imports Util
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Date;
+import java.util.List;
+import java.util.Random;
+
+/**
+ * Janela principal da aplicação de Regressão Espectral.
+ *
+ * <p>Estende {@link JFrame} e organiza a interface gráfica em três painéis:</p>
+ * <ul>
+ *   <li>Painel de seleção de arquivos de entrada (Xcal, Ycal, Xteste, Yteste)
+ *       e configuração dos valores de {@code m} (bags) e {@code k} (frações de subamostra).</li>
+ *   <li>Painel de ação com o botão de execução da análise.</li>
+ *   <li>Painel de resultados com área de texto rolável exibindo métricas e log.</li>
+ * </ul>
+ *
+ * @author Wagner Oliveira de Araujo
+ * @version 1.1
+ */
+public class BaggingOptimized extends JFrame {
+
+    /** Campo de texto exibindo o caminho do arquivo Xcal (matriz de calibração). */
+    private JTextField txtXcal;
+
+    /** Campo de texto exibindo o caminho do arquivo Ycal (vetor de resposta de calibração). */
+    private JTextField txtYcal;
+
+    /** Campo de texto exibindo o caminho do arquivo Xteste (matriz de teste). */
+    private JTextField txtXteste;
+
+    /** Campo de texto exibindo o caminho do arquivo Yteste (vetor de resposta de teste). */
+    private JTextField txtYteste;
+
+    /** Área de texto para exibição do log de resultados e métricas. */
+    private JTextArea txtResultados;
+
+    /** Botão que dispara a execução completa da análise. */
+    private JButton btnExecutar;
+
+    /**
+     * Campo editável onde o usuário informa os valores de {@code m} (número de bags)
+     * a serem testados durante a otimização por validação cruzada.
+     * Os valores devem ser inteiros positivos separados por vírgula.
+     * Exemplo: {@code 10, 20, 30, 40, 50}.
+     */
+    private JTextField txtMValues;
+
+    /**
+     * Campo editável onde o usuário informa os valores de {@code k} (frações de subamostra)
+     * a serem testados durante a otimização por validação cruzada do Subagging.
+     * Os valores devem ser decimais entre 0 e 1 separados por vírgula.
+     * Exemplo: {@code 0.10, 0.20, 0.30, 0.40, 0.50}.
+     */
+    private JTextField txtKValues;
+
+    /** Referência ao arquivo selecionado para Xcal. */
+    private File fileXcal;
+
+    /** Referência ao arquivo selecionado para Ycal. */
+    private File fileYcal;
+
+    /** Referência ao arquivo selecionado para Xteste. */
+    private File fileXteste;
+
+    /** Referência ao arquivo selecionado para Yteste. */
+    private File fileYteste;
+
+    // ========================================================================
+    // CLASSES AUXILIARES (inner static classes)
+    // ========================================================================
+
+    /**
+     * Armazena o resultado de uma rodada de validação cruzada para um
+     * determinado valor de parâmetro.
+     *
+     * @author Wagner Oliveira de Araujo
+     * @version 1.1
+     */
+    static class CVResult {
+
+        /** Valor do parâmetro testado (ex.: número de bags {@code m}). */
+        int parameterValue;
+
+        /** Média do RMSE calculado nos {@code k} folds da validação cruzada. */
+        double meanRMSE;
+
+        /** Desvio padrão do RMSE calculado nos {@code k} folds. */
+        double stdRMSE;
+
+        /**
+         * Constrói um resultado de validação cruzada.
+         *
+         * @param param valor do parâmetro avaliado
+         * @param mean  média do RMSE entre os folds
+         * @param std   desvio padrão do RMSE entre os folds
+         */
+        CVResult(int param, double mean, double std) {
+            this.parameterValue = param;
+            this.meanRMSE = mean;
+            this.stdRMSE = std;
+        }
+    }
+
+    /**
+     * Encapsula os parâmetros ótimos encontrados pela otimização via
+     * validação cruzada para Bagging e Subagging.
+     *
+     * @author Wagner Oliveira de Araujo
+     * @version 1.1
+     */
+    static class OptimalParams {
+
+        /** Número ótimo de bags para o método Bagging ({@code m*}). */
+        int mBagging;
+
+        /** Número ótimo de bags para o método Subagging ({@code m*}). */
+        int mSubagging;
+
+        /**
+         * Fração ótima da amostra para o Subagging ({@code k*}).
+         * Valores típicos: 0.5, 0.6, 0.7, 0.8 (50% a 80% das amostras).
+         */
+        double kSubagging;
+
+        /** RMSE médio de validação cruzada para o Bagging com {@code mBagging} bags. */
+        double rmseCVBagging;
+
+        /** RMSE médio de validação cruzada para o Subagging com {@code mSubagging} bags e {@code kSubagging}. */
+        double rmseCVSubagging;
+
+        /**
+         * Constrói um objeto com os parâmetros ótimos de Bagging e Subagging.
+         *
+         * @param mBag    número ótimo de bags para Bagging
+         * @param mSub    número ótimo de bags para Subagging
+         * @param kSub    fração ótima da amostra para Subagging
+         * @param rmseBag RMSE-CV do Bagging com parâmetros ótimos
+         * @param rmseSub RMSE-CV do Subagging com parâmetros ótimos
+         */
+        OptimalParams(int mBag, int mSub, double kSub, double rmseBag, double rmseSub) {
+            this.mBagging = mBag;
+            this.mSubagging = mSub;
+            this.kSubagging = kSub;
+            this.rmseCVBagging = rmseBag;
+            this.rmseCVSubagging = rmseSub;
+        }
+    }
+
+    /**
+     * Agrupa as métricas de avaliação final de um modelo no conjunto de teste.
+     *
+     * @author Wagner Oliveira de Araujo
+     * @version 1.1
+     */
+    static class FinalMetrics {
+
+        /** Raiz do Erro Quadrático Médio (Root Mean Squared Error). */
+        double rmse;
+
+        /** Erro Absoluto Médio (Mean Absolute Error). */
+        double mae;
+
+        /** Coeficiente de Determinação R². */
+        double r2;
+
+        /** Tempo de execução do modelo em milissegundos. */
+        double timeMs;
+
+        /**
+         * Constrói um conjunto de métricas de avaliação.
+         *
+         * @param rmse  valor do RMSE
+         * @param mae   valor do MAE
+         * @param r2    valor do R²
+         * @param time  tempo de execução em milissegundos
+         */
+        FinalMetrics(double rmse, double mae, double r2, double time) {
+            this.rmse = rmse;
+            this.mae = mae;
+            this.r2 = r2;
+            this.timeMs = time;
+        }
+    }
+
+    // ========================================================================
+    // CONSTRUTOR
+    // ========================================================================
+
+    /**
+     * Constrói e configura a janela principal da aplicação.
+     *
+     * <p>Define o título, comportamento de fechamento, tamanho inicial e
+     * posicionamento centralizado na tela, em seguida chama {@link #initComponents()}
+     * para montar a interface gráfica.</p>
+     */
+    public BaggingOptimized() {
+        setTitle("Regressão Espectral - Otimização por Validação Cruzada (RLM, Bagging e Subagging)");
+        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setSize(1000, 900);
+        setLocationRelativeTo(null);
+        initComponents();
+    }
+
+    // ========================================================================
+    // INICIALIZAÇÃO DA INTERFACE GRÁFICA
+    // ========================================================================
+
+    /**
+     * Inicializa e organiza todos os componentes visuais da janela principal.
+     *
+     * <p>Monta três regiões no {@link BorderLayout} do painel principal:</p>
+     * <ul>
+     *   <li>{@code NORTH} – painel com 6 linhas: seleção dos 4 arquivos de entrada,
+     *       campo {@link #txtMValues} para configuração dos valores de {@code m} e
+     *       campo {@link #txtKValues} para configuração dos valores de {@code k}.</li>
+     *   <li>{@code CENTER} – painel com o botão de execução da análise.</li>
+     *   <li>{@code SOUTH} – painel com a área de texto de resultados em scroll.</li>
+     * </ul>
+     */
+    private void initComponents() {
+        // Painel principal com BorderLayout ocupa toda a janela
+        JPanel mainPanel = new JPanel(new BorderLayout(10, 10));
+        mainPanel.setBorder(new EmptyBorder(15, 15, 15, 15));
+
+        // ── PAINEL SUPERIOR: arquivos + parâmetros + botão ──────────────────
+        JPanel panelTopo = new JPanel(new BorderLayout(10, 8));
+
+        // Painel de seleção de arquivos e configuração (6 linhas)
+        JPanel panelArquivos = new JPanel(new GridLayout(6, 1, 5, 8));
+        panelArquivos.setBorder(new TitledBorder("Seleção de Arquivos e Configuração"));
+
+        panelArquivos.add(criarPainelArquivo("Xcal (Calibração - X):", txtXcal = new JTextField(),
+                e -> selecionarArquivo("Xcal", txtXcal, f -> fileXcal = f)));
+        panelArquivos.add(criarPainelArquivo("Ycal (Calibração - Y):", txtYcal = new JTextField(),
+                e -> selecionarArquivo("Ycal", txtYcal, f -> fileYcal = f)));
+        panelArquivos.add(criarPainelArquivo("Xteste (Teste - X):", txtXteste = new JTextField(),
+                e -> selecionarArquivo("Xteste", txtXteste, f -> fileXteste = f)));
+        panelArquivos.add(criarPainelArquivo("Yteste (Teste - Y):", txtYteste = new JTextField(),
+                e -> selecionarArquivo("Yteste", txtYteste, f -> fileYteste = f)));
+
+        // Painel de entrada dos valores de m (número de bags)
+        JPanel panelMValues = new JPanel(new BorderLayout(5, 0));
+        JLabel lblMValues = new JLabel("Valores de m (bags):");
+        lblMValues.setPreferredSize(new Dimension(180, 25));
+        lblMValues.setToolTipText("Digite os valores de número de bags separados por vírgula");
+
+        txtMValues = new JTextField("10, 20, 30, 40, 50");
+        txtMValues.setToolTipText("Digite os valores separados por vírgula. Ex: 10, 25, 50, 100");
+        txtMValues.setBackground(Color.WHITE);
+
+        JLabel lblDicaM = new JLabel("(separados por vírgula)");
+        lblDicaM.setFont(new Font("Arial", Font.ITALIC, 11));
+        lblDicaM.setForeground(Color.GRAY);
+        lblDicaM.setPreferredSize(new Dimension(160, 25));
+
+        panelMValues.add(lblMValues, BorderLayout.WEST);
+        panelMValues.add(txtMValues, BorderLayout.CENTER);
+        panelMValues.add(lblDicaM, BorderLayout.EAST);
+
+        panelArquivos.add(panelMValues);
+
+        // Painel de entrada dos valores de k (frações do Subagging)
+        JPanel panelKValues = new JPanel(new BorderLayout(5, 0));
+        JLabel lblKValues = new JLabel("Valores de k (subagging):");
+        lblKValues.setPreferredSize(new Dimension(180, 25));
+        lblKValues.setToolTipText("Digite as frações de subamostra separadas por vírgula (entre 0 e 1)");
+
+        txtKValues = new JTextField("0.10, 0.20, 0.30, 0.40, 0.50");
+        txtKValues.setToolTipText("Digite os valores separados por vírgula. Ex: 0.5, 0.6, 0.7, 0.8");
+        txtKValues.setBackground(Color.WHITE);
+
+        JLabel lblDicaK = new JLabel("(valores entre 0 e 1)");
+        lblDicaK.setFont(new Font("Arial", Font.ITALIC, 11));
+        lblDicaK.setForeground(Color.GRAY);
+        lblDicaK.setPreferredSize(new Dimension(160, 25));
+
+        panelKValues.add(lblKValues, BorderLayout.WEST);
+        panelKValues.add(txtKValues, BorderLayout.CENTER);
+        panelKValues.add(lblDicaK, BorderLayout.EAST);
+
+        panelArquivos.add(panelKValues);
+
+        // Painel de ação com botão de execução
+        JPanel panelAcao = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 8));
+        btnExecutar = new JButton("Executar Análise com Otimização CV");
+        btnExecutar.setFont(new Font("Arial", Font.BOLD, 14));
+        btnExecutar.setPreferredSize(new Dimension(300, 40));
+        btnExecutar.setBackground(new Color(34, 139, 34));
+        btnExecutar.setForeground(Color.WHITE);
+        btnExecutar.setFocusPainted(false);
+        btnExecutar.addActionListener(e -> executarAnalise());
+        panelAcao.add(btnExecutar);
+
+        // Agrupa arquivos no painel superior
+        panelTopo.add(panelArquivos, BorderLayout.CENTER);
+
+        // ── PAINEL INFERIOR: área de resultados com scroll ───────────────────
+        JPanel panelResultados = new JPanel(new BorderLayout());
+        panelResultados.setBorder(new TitledBorder("Resultados"));
+
+        txtResultados = new JTextArea();
+        txtResultados.setEditable(false);
+        txtResultados.setFont(new Font("Monospaced", Font.PLAIN, 11));
+        txtResultados.setLineWrap(false);
+
+        JScrollPane scrollResultados = new JScrollPane(txtResultados);
+        panelResultados.add(scrollResultados, BorderLayout.CENTER);
+
+        // ── COMPOSIÇÃO FINAL ─────────────────────────────────────────────────
+        // NORTH  = arquivos e parâmetros (altura fixa, não cresce)
+        // CENTER = botão fixo no NORTH + resultados no CENTER (cresce com janela)
+        JPanel panelCentral = new JPanel(new BorderLayout(0, 8));
+        panelCentral.add(panelAcao,       BorderLayout.NORTH);
+        panelCentral.add(panelResultados, BorderLayout.CENTER);
+
+        mainPanel.add(panelTopo,    BorderLayout.NORTH);
+        mainPanel.add(panelCentral, BorderLayout.CENTER);
+
+        add(mainPanel);
+    }
+
+    /**
+     * Cria um painel de linha para seleção de um arquivo de entrada.
+     *
+     * <p>O painel contém um rótulo descritivo à esquerda, um {@link JTextField}
+     * somente leitura ao centro exibindo o caminho do arquivo, e um botão
+     * "Selecionar" à direita que dispara o {@link JFileChooser}.</p>
+     *
+     * @param label     texto descritivo exibido como rótulo do campo
+     * @param textField campo de texto que receberá o caminho do arquivo selecionado
+     * @param action    listener associado ao botão "Selecionar"
+     * @return painel configurado com os três componentes
+     */
+    private JPanel criarPainelArquivo(String label, JTextField textField,
+                                      java.awt.event.ActionListener action) {
+        JPanel panel = new JPanel(new BorderLayout(5, 0));
+
+        JLabel lbl = new JLabel(label);
+        lbl.setPreferredSize(new Dimension(180, 25));
+
+        textField.setEditable(false);
+        textField.setBackground(Color.WHITE);
+
+        JButton btnSelecionar = new JButton("Selecionar");
+        btnSelecionar.setPreferredSize(new Dimension(100, 25));
+        btnSelecionar.addActionListener(action);
+
+        panel.add(lbl, BorderLayout.WEST);
+        panel.add(textField, BorderLayout.CENTER);
+        panel.add(btnSelecionar, BorderLayout.EAST);
+
+        return panel;
+    }
+
+    /**
+     * Abre um {@link JFileChooser} filtrado para arquivos {@code .txt} e,
+     * se o usuário confirmar a seleção, atualiza o campo de texto e
+     * armazena a referência ao arquivo via callback.
+     *
+     * @param tipo      identificador do tipo de arquivo (ex.: "Xcal"), usado no título do diálogo
+     * @param textField campo de texto que receberá o caminho absoluto do arquivo selecionado
+     * @param consumer  callback {@link FileConsumer} que recebe o {@link File} selecionado
+     */
+    private void selecionarArquivo(String tipo, JTextField textField, FileConsumer consumer) {
+        JFileChooser fileChooser = new JFileChooser();
+        fileChooser.setDialogTitle("Selecionar arquivo " + tipo);
+        fileChooser.setFileFilter(new javax.swing.filechooser.FileFilter() {
+            @Override
+            public boolean accept(File f) {
+                return f.isDirectory() || f.getName().toLowerCase().endsWith(".txt");
+            }
+
+            @Override
+            public String getDescription() {
+                return "Arquivos de texto (*.txt)";
+            }
+        });
+
+        if (fileChooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
+            File selectedFile = fileChooser.getSelectedFile();
+            textField.setText(selectedFile.getAbsolutePath());
+            consumer.accept(selectedFile);
+        }
+    }
+
+    // ========================================================================
+    // PARSING E VALIDAÇÃO DOS VALORES DE m
+    // ========================================================================
+
+    /**
+     * Lê, valida e converte os valores de {@code m} (número de bags) digitados
+     * pelo usuário no campo {@link #txtMValues}.
+     *
+     * <p>O texto deve conter inteiros positivos separados por vírgula.
+     * Exemplos de entradas válidas:</p>
+     * <pre>
+     *   "10, 20, 30, 40, 50"
+     *   "5,15,25,100"
+     * </pre>
+     *
+     * @return array {@code int[]} com os valores de {@code m} informados pelo usuário
+     * @throws IllegalArgumentException se o campo estiver vazio, contiver valores
+     *                                  não numéricos ou valores menores ou iguais a zero
+     */
+    private int[] parseMValues() {
+        String rawText = txtMValues.getText().trim();
+
+        if (rawText.isEmpty()) {
+            throw new IllegalArgumentException(
+                "O campo de valores de m (bags) está vazio.\n" +
+                "Digite ao menos um valor inteiro positivo. Ex: 10, 20, 30, 40, 50"
+            );
+        }
+
+        String[] parts   = rawText.split(",");
+        int[]    mValues = new int[parts.length];
+
+        for (int i = 0; i < parts.length; i++) {
+            String part = parts[i].trim();
+            try {
+                int value = Integer.parseInt(part);
+                if (value <= 0) {
+                    throw new IllegalArgumentException(
+                        "Valor inválido no campo m (bags): \"" + part + "\".\n" +
+                        "Todos os valores devem ser inteiros positivos (> 0)."
+                    );
+                }
+                mValues[i] = value;
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(
+                    "Valor inválido no campo m (bags): \"" + part + "\".\n" +
+                    "Use apenas números inteiros separados por vírgula. Ex: 10, 20, 30"
+                );
+            }
+        }
+
+        return mValues;
+    }
+
+    // ========================================================================
+    // PARSING E VALIDAÇÃO DOS VALORES DE k
+    // ========================================================================
+
+    /**
+     * Lê, valida e converte os valores de {@code k} (frações de subamostra) digitados
+     * pelo usuário no campo {@link #txtKValues}.
+     *
+     * <p>O texto deve conter decimais entre 0 (exclusive) e 1 (inclusive) separados por vírgula.
+     * Exemplos de entradas válidas:</p>
+     * <pre>
+     *   "0.5, 0.6, 0.7, 0.8"
+     *   "0.10, 0.20, 0.30, 0.40, 0.50"
+     * </pre>
+     *
+     * @return array {@code double[]} com os valores de {@code k} informados pelo usuário
+     * @throws IllegalArgumentException se o campo estiver vazio, contiver valores
+     *                                  não numéricos ou fora do intervalo (0, 1]
+     */
+    private double[] parseKValues() {
+        String rawText = txtKValues.getText().trim();
+
+        if (rawText.isEmpty()) {
+            throw new IllegalArgumentException(
+                "O campo de valores de k (subagging) está vazio.\n" +
+                "Digite ao menos um valor decimal entre 0 e 1. Ex: 0.5, 0.6, 0.7, 0.8"
+            );
+        }
+
+        String[]  parts   = rawText.split(",");
+        double[]  kValues = new double[parts.length];
+
+        for (int i = 0; i < parts.length; i++) {
+            String part = parts[i].trim();
+            try {
+                double value = Double.parseDouble(part);
+                if (value <= 0.0 || value > 1.0) {
+                    throw new IllegalArgumentException(
+                        "Valor inválido no campo k (subagging): \"" + part + "\".\n" +
+                        "Todos os valores devem estar no intervalo (0, 1]. Ex: 0.5, 0.6, 0.7, 0.8"
+                    );
+                }
+                kValues[i] = value;
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(
+                    "Valor inválido no campo k (subagging): \"" + part + "\".\n" +
+                    "Use apenas números decimais separados por vírgula. Ex: 0.5, 0.6, 0.7, 0.8"
+                );
+            }
+        }
+
+        return kValues;
+    }
+
+    // ========================================================================
+    // ETAPA 2: OTIMIZAÇÃO DE PARÂMETROS VIA VALIDAÇÃO CRUZADA 5-FOLD
+    // ========================================================================
+
+    /**
+     * Realiza validação cruzada 5-fold sobre o conjunto de calibração para
+     * avaliar o desempenho do método <b>Bagging</b> com {@code m} bags.
+     *
+     * <p>O conjunto de calibração é embaralhado com semente fixa ({@code Random(42)})
+     * para reprodutibilidade, dividido em 5 folds iguais, e em cada iteração
+     * um modelo RLM+Bagging é treinado nos folds restantes e avaliado no fold
+     * de validação. O RMSE médio e o desvio padrão entre os folds são retornados.</p>
+     *
+     * @param Xcal matriz de calibração (amostras × variáveis)
+     * @param Ycal vetor de resposta de calibração (amostras × 1)
+     * @param m    número de bags (bootstrap samples) a utilizar
+     * @return {@link CVResult} contendo o valor de {@code m}, o RMSE médio e
+     *         o desvio padrão entre os folds
+     */
+    private CVResult optimizeBaggingParameters(SimpleMatrix Xcal, SimpleMatrix Ycal, int m) {
+        int nFolds = 5;
+        int n      = Xcal.numRows();
+
+        // Cria lista de índices embaralhados para garantir reprodutibilidade
+        List<Integer> indices = new ArrayList<>();
+        for (int i = 0; i < n; i++) indices.add(i);
+        Collections.shuffle(indices, new Random(42));
+
+        List<Double> rmseList = new ArrayList<>();
+
+        for (int fold = 0; fold < nFolds; fold++) {
+            // Define os limites do fold de validação corrente
+            int foldSize = n / nFolds;
+            int startIdx = fold * foldSize;
+            int endIdx   = (fold == nFolds - 1) ? n : (fold + 1) * foldSize;
+
+            List<Integer> trainIndices = new ArrayList<>();
+            List<Integer> valIndices   = new ArrayList<>();
+
+            // Separa índices de treino e validação para este fold
+            for (int i = 0; i < n; i++) {
+                if (i >= startIdx && i < endIdx) {
+                    valIndices.add(indices.get(i));
+                } else {
+                    trainIndices.add(indices.get(i));
+                }
+            }
+
+            // Extrai as submatrizes de treino e validação
+            SimpleMatrix Xtrain = extractRows(Xcal, trainIndices);
+            SimpleMatrix Ytrain = extractRows(Ycal, trainIndices);
+            SimpleMatrix Xval   = extractRows(Xcal, valIndices);
+            SimpleMatrix Yval   = extractRows(Ycal, valIndices);
+
+            // Treina e avalia o modelo Bagging (com reposição, fração = 1.0)
+            SimpleMatrix Ypred = performBagging(Xtrain, Ytrain, Xval, m, true, 1.0);
+            rmseList.add(calculateRMSE(Yval, Ypred));
+        }
+
+        double meanRMSE = rmseList.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
+        double stdRMSE  = calculateStdDev(rmseList, meanRMSE);
+
+        return new CVResult(m, meanRMSE, stdRMSE);
+    }
+
+    /**
+     * Realiza validação cruzada 5-fold sobre o conjunto de calibração para
+     * avaliar o desempenho do método <b>Subagging</b> com {@code m} bags e
+     * fração de subamostra {@code subSampleFraction}.
+     *
+     * <p>Idêntico ao protocolo de {@link #optimizeBaggingParameters} exceto que
+     * a reamostragem é feita <em>sem reposição</em> e utiliza apenas
+     * {@code (n × subSampleFraction)} amostras por bag.</p>
+     *
+     * @param Xcal               matriz de calibração (amostras × variáveis)
+     * @param Ycal               vetor de resposta de calibração (amostras × 1)
+     * @param m                  número de bags a utilizar
+     * @param subSampleFraction  fração {@code k} da amostra original usada por bag
+     *                           (ex.: 0.7 = 70% das amostras)
+     * @return {@link CVResult} contendo o valor de {@code m}, o RMSE médio e
+     *         o desvio padrão entre os folds
+     */
+    private CVResult optimizeSubaggingParameters(SimpleMatrix Xcal, SimpleMatrix Ycal,
+                                                 int m, double subSampleFraction) {
+        int nFolds = 5;
+        int n      = Xcal.numRows();
+
+        List<Integer> indices = new ArrayList<>();
+        for (int i = 0; i < n; i++) indices.add(i);
+        Collections.shuffle(indices, new Random(42));
+
+        List<Double> rmseList = new ArrayList<>();
+
+        for (int fold = 0; fold < nFolds; fold++) {
+            int foldSize = n / nFolds;
+            int startIdx = fold * foldSize;
+            int endIdx   = (fold == nFolds - 1) ? n : (fold + 1) * foldSize;
+
+            List<Integer> trainIndices = new ArrayList<>();
+            List<Integer> valIndices   = new ArrayList<>();
+
+            for (int i = 0; i < n; i++) {
+                if (i >= startIdx && i < endIdx) {
+                    valIndices.add(indices.get(i));
+                } else {
+                    trainIndices.add(indices.get(i));
+                }
+            }
+
+            SimpleMatrix Xtrain = extractRows(Xcal, trainIndices);
+            SimpleMatrix Ytrain = extractRows(Ycal, trainIndices);
+            SimpleMatrix Xval   = extractRows(Xcal, valIndices);
+            SimpleMatrix Yval   = extractRows(Ycal, valIndices);
+
+            // Treina e avalia o modelo Subagging (sem reposição)
+            SimpleMatrix Ypred = performBagging(Xtrain, Ytrain, Xval, m, false, subSampleFraction);
+            rmseList.add(calculateRMSE(Yval, Ypred));
+        }
+
+        double meanRMSE = rmseList.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
+        double stdRMSE  = calculateStdDev(rmseList, meanRMSE);
+
+        return new CVResult(m, meanRMSE, stdRMSE);
+    }
+
+    /**
+     * Executa a busca em grade (<i>grid search</i>) para encontrar os parâmetros
+     * ótimos de Bagging e Subagging usando validação cruzada 5-fold.
+     *
+     * <p>Os valores de {@code m} testados são fornecidos pelo array {@code mValues}
+     * e os valores de {@code k} pelo array {@code kValues}, ambos definidos pelo
+     * usuário via interface. O log de cada combinação testada é anexado ao
+     * {@link StringBuilder} fornecido.</p>
+     *
+     * @param Xcal    matriz de calibração (amostras × variáveis)
+     * @param Ycal    vetor de resposta de calibração (amostras × 1)
+     * @param mValues array de inteiros com os valores de {@code m} a testar
+     * @param kValues array de doubles com os valores de {@code k} a testar
+     * @param log     {@link StringBuilder} para registro dos resultados intermediários
+     * @return {@link OptimalParams} com os melhores parâmetros encontrados para
+     *         Bagging e Subagging
+     */
+    private OptimalParams findOptimalParameters(SimpleMatrix Xcal, SimpleMatrix Ycal,
+                                                int[] mValues, double[] kValues,
+                                                StringBuilder log) {
+        log.append("\n════════════════════════════════════════════════════════════════\n");
+        log.append("     ETAPA 2: OTIMIZAÇÃO DE PARÂMETROS (Validação Cruzada 5-Fold)\n");
+        log.append("════════════════════════════════════════════════════════════════\n\n");
+        log.append(String.format("📋 Valores de m testados: %s\n", Arrays.toString(mValues)));
+        log.append(String.format("📋 Valores de k testados: %s\n\n", Arrays.toString(kValues)));
+
+        // --- Otimização do Bagging ---
+        log.append("🔍 OTIMIZANDO RLM-BAGGING (testando m):\n");
+        log.append("─────────────────────────────────────────\n");
+
+        CVResult bestBagging = null;
+        for (int m : mValues) {
+            CVResult result = optimizeBaggingParameters(Xcal, Ycal, m);
+            log.append(String.format("   m=%3d → RMSE-CV = %.4f ± %.4f\n",
+                    m, result.meanRMSE, result.stdRMSE));
+            if (bestBagging == null || result.meanRMSE < bestBagging.meanRMSE) {
+                bestBagging = result;
+            }
+        }
+        log.append(String.format("\n✅ Melhor configuração Bagging: m* = %d (RMSE-CV = %.4f)\n\n",
+                bestBagging.parameterValue, bestBagging.meanRMSE));
+
+        // --- Otimização do Subagging ---
+        log.append("🔍 OTIMIZANDO RLM-SUBAGGING (testando k × m):\n");
+        log.append("─────────────────────────────────────────────────\n");
+
+        CVResult bestSubagging = null;
+        double bestK = kValues[0];
+
+        for (double k : kValues) {
+            log.append(String.format("\n   Testando k=%.0f%%:\n", k * 100));
+            for (int m : mValues) {
+                CVResult result = optimizeSubaggingParameters(Xcal, Ycal, m, k);
+                log.append(String.format("      m=%3d → RMSE-CV = %.4f ± %.4f\n",
+                        m, result.meanRMSE, result.stdRMSE));
+                if (bestSubagging == null || result.meanRMSE < bestSubagging.meanRMSE) {
+                    bestSubagging = result;
+                    bestK = k;
+                }
+            }
+        }
+        log.append(String.format("\n✅ Melhor configuração Subagging: k* = %.0f%%, m* = %d (RMSE-CV = %.4f)\n\n",
+                bestK * 100, bestSubagging.parameterValue, bestSubagging.meanRMSE));
+
+        return new OptimalParams(
+                bestBagging.parameterValue,
+                bestSubagging.parameterValue,
+                bestK,
+                bestBagging.meanRMSE,
+                bestSubagging.meanRMSE
+        );
+    }
+
+    // ========================================================================
+    // ETAPA 3: EXECUÇÃO PRINCIPAL E AVALIAÇÃO FINAL
+    // ========================================================================
+
+    /**
+     * Ponto de entrada da análise completa, acionado pelo botão {@link #btnExecutar}.
+     *
+     * <p>Realiza as seguintes verificações antes de iniciar:</p>
+     * <ul>
+     *   <li>Valida se todos os 4 arquivos de entrada foram selecionados.</li>
+     *   <li>Valida e converte os valores de {@code m} via {@link #parseMValues()}.</li>
+     *   <li>Valida e converte os valores de {@code k} via {@link #parseKValues()}.</li>
+     * </ul>
+     *
+     * <p>Toda a computação é executada em uma {@link SwingWorker} para não bloquear
+     * a EDT (<i>Event Dispatch Thread</i>). Ao concluir:</p>
+     * <ol>
+     *   <li>Carrega as matrizes dos arquivos selecionados.</li>
+     *   <li>Chama {@link #findOptimalParameters} (Etapa 2) para obter os hiperparâmetros ótimos.</li>
+     *   <li>Avalia os três modelos (RLM, Bagging, Subagging) no conjunto de teste (Etapa 3).</li>
+     *   <li>Exibe a tabela comparativa e a análise final na área de resultados.</li>
+     *   <li>Salva o relatório em arquivo {@code .txt} com timestamp.</li>
+     *   <li>Abre três janelas com gráficos de valores reais vs. preditos.</li>
+     * </ol>
+     */
+    private void executarAnalise() {
+        if (fileXcal == null || fileYcal == null || fileXteste == null || fileYteste == null) {
+            JOptionPane.showMessageDialog(this,
+                    "Por favor, selecione todos os 4 arquivos antes de executar a análise!",
+                    "Aviso", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        // Valida e converte os valores de m antes de iniciar a thread de processamento
+        final int[] mValues;
+        try {
+            mValues = parseMValues();
+        } catch (IllegalArgumentException ex) {
+            JOptionPane.showMessageDialog(this,
+                    ex.getMessage(),
+                    "Erro nos valores de m (bags)", JOptionPane.ERROR_MESSAGE);
+            txtMValues.requestFocus();
+            txtMValues.selectAll();
+            return;
+        }
+
+        // Valida e converte os valores de k antes de iniciar a thread de processamento
+        final double[] kValues;
+        try {
+            kValues = parseKValues();
+        } catch (IllegalArgumentException ex) {
+            JOptionPane.showMessageDialog(this,
+                    ex.getMessage(),
+                    "Erro nos valores de k (subagging)", JOptionPane.ERROR_MESSAGE);
+            txtKValues.requestFocus();
+            txtKValues.selectAll();
+            return;
+        }
+
+        txtResultados.setText("Processando análise com otimização por validação cruzada...\n");
+        btnExecutar.setEnabled(false);
+
+        // Executa toda a análise em background para não bloquear a interface
+        new SwingWorker<String, Void>() {
+            @Override
+            protected String doInBackground() throws Exception {
+                StringBuilder resultado = new StringBuilder();
+
+                try {
+                    // Detecta dimensões automaticamente a partir dos arquivos
+                    int[] dimsXcal   = detectarDimensoes(fileXcal);
+                    int   rowsYcal   = contarLinhas(fileYcal);
+                    int[] dimsXteste = detectarDimensoes(fileXteste);
+                    int   rowsYteste = contarLinhas(fileYteste);
+
+                    resultado.append("════════════════════════════════════════════════════════════════\n");
+                    resultado.append("   ANÁLISE COM OTIMIZAÇÃO POR VALIDAÇÃO CRUZADA 5-FOLD\n");
+                    resultado.append("════════════════════════════════════════════════════════════════\n\n");
+
+                    resultado.append(String.format("📋 Valores de m (bags) definidos pelo usuário: %s\n",
+                            Arrays.toString(mValues)));
+                    resultado.append(String.format("📋 Valores de k (subagging) definidos pelo usuário: %s\n\n",
+                            Arrays.toString(kValues)));
+
+                    resultado.append("=== DIMENSÕES DETECTADAS ===\n");
+                    resultado.append(String.format("Xcal: %d amostras × %d variáveis\n", dimsXcal[0], dimsXcal[1]));
+                    resultado.append(String.format("Ycal: %d valores\n", rowsYcal));
+                    resultado.append(String.format("Xteste: %d amostras × %d variáveis\n", dimsXteste[0], dimsXteste[1]));
+                    resultado.append(String.format("Yteste: %d valores\n", rowsYteste));
+
+                    // Carrega as matrizes em memória
+                    SimpleMatrix Xcal   = loadMatrixFromFile(fileXcal.getAbsolutePath(),   dimsXcal[0],   dimsXcal[1]);
+                    SimpleMatrix Ycal   = loadVectorFromFile(fileYcal.getAbsolutePath(),   rowsYcal);
+                    SimpleMatrix Xteste = loadMatrixFromFile(fileXteste.getAbsolutePath(), dimsXteste[0], dimsXteste[1]);
+                    SimpleMatrix Yteste = loadVectorFromFile(fileYteste.getAbsolutePath(), rowsYteste);
+
+                    // Etapa 2: encontra os parâmetros ótimos por validação cruzada
+                    OptimalParams optParams = findOptimalParameters(Xcal, Ycal, mValues, kValues, resultado);
+
+                    // Etapa 3: avaliação final no conjunto de teste
+                    resultado.append("════════════════════════════════════════════════════════════════\n");
+                    resultado.append("     ETAPA 3: AVALIAÇÃO FINAL NO CONJUNTO DE TESTE\n");
+                    resultado.append("════════════════════════════════════════════════════════════════\n\n");
+
+                    // 1. RLM Simples
+                    resultado.append("─── 1️⃣  RLM SIMPLES ───\n");
+                    long inicioRLM  = System.nanoTime();
+                    SimpleMatrix YpredRLM = performRLM(Xcal, Ycal, Xteste);
+                    long fimRLM     = System.nanoTime();
+                    FinalMetrics metricsRLM = calculateMetrics(Yteste, YpredRLM, fimRLM - inicioRLM);
+
+                    resultado.append(String.format("RMSE = %.4f\n", metricsRLM.rmse));
+                    resultado.append(String.format("MAE  = %.4f\n", metricsRLM.mae));
+                    resultado.append(String.format("R²   = %.4f\n", metricsRLM.r2));
+                    resultado.append(String.format("Tempo: %.2f ms\n\n", metricsRLM.timeMs));
+
+                    // 2. RLM + Bagging com parâmetros ótimos
+                    resultado.append(String.format("─── 2️⃣  RLM + BAGGING (m* = %d) ───\n", optParams.mBagging));
+                    long inicioBag  = System.nanoTime();
+                    SimpleMatrix YpredBag = performBagging(Xcal, Ycal, Xteste,
+                            optParams.mBagging, true, 1.0);
+                    long fimBag     = System.nanoTime();
+                    FinalMetrics metricsBag = calculateMetrics(Yteste, YpredBag, fimBag - inicioBag);
+
+                    resultado.append(String.format("RMSE = %.4f\n", metricsBag.rmse));
+                    resultado.append(String.format("MAE  = %.4f\n", metricsBag.mae));
+                    resultado.append(String.format("R²   = %.4f\n", metricsBag.r2));
+                    resultado.append(String.format("Tempo: %.2f ms\n\n", metricsBag.timeMs));
+
+                    // 3. RLM + Subagging com parâmetros ótimos
+                    resultado.append(String.format("─── 3️⃣  RLM + SUBAGGING (k* = %.0f%%, m* = %d) ───\n",
+                            optParams.kSubagging * 100, optParams.mSubagging));
+                    long inicioSub  = System.nanoTime();
+                    SimpleMatrix YpredSub = performBagging(Xcal, Ycal, Xteste,
+                            optParams.mSubagging, false, optParams.kSubagging);
+                    long fimSub     = System.nanoTime();
+                    FinalMetrics metricsSub = calculateMetrics(Yteste, YpredSub, fimSub - inicioSub);
+
+                    resultado.append(String.format("RMSE = %.4f\n", metricsSub.rmse));
+                    resultado.append(String.format("MAE  = %.4f\n", metricsSub.mae));
+                    resultado.append(String.format("R²   = %.4f\n", metricsSub.r2));
+                    resultado.append(String.format("Tempo: %.2f ms\n\n", metricsSub.timeMs));
+
+                    // Tabela comparativa final
+                    resultado.append("════════════════════════════════════════════════════════════════\n");
+                    resultado.append("                 📊 COMPARAÇÃO FINAL 📊\n");
+                    resultado.append("════════════════════════════════════════════════════════════════\n\n");
+
+                    resultado.append("┌─────────────────────────────────────────────────────────────┐\n");
+                    resultado.append("│                    PARÂMETROS ÓTIMOS                        │\n");
+                    resultado.append("├─────────────────────────────────────────────────────────────┤\n");
+                    resultado.append(String.format("│ RLM-Bagging:   m* = %2d    (RMSE-CV = %.4f)           │\n",
+                            optParams.mBagging, optParams.rmseCVBagging));
+                    resultado.append(String.format("│ RLM-Subagging: k* = %.0f%%, m* = %2d  (RMSE-CV = %.4f)  │\n",
+                            optParams.kSubagging * 100, optParams.mSubagging, optParams.rmseCVSubagging));
+                    resultado.append("└─────────────────────────────────────────────────────────────┘\n\n");
+
+                    resultado.append("┌─────────────────────────────────────────────────────────────┐\n");
+                    resultado.append("│              MÉTRICAS NO CONJUNTO DE TESTE                  │\n");
+                    resultado.append("├──────────────────┬──────────┬──────────┬──────────┬─────────┤\n");
+                    resultado.append("│ Técnica          │   RMSE   │   MAE    │    R²    │  Tempo  │\n");
+                    resultado.append("├──────────────────┼──────────┼──────────┼──────────┼─────────┤\n");
+                    resultado.append(String.format("│ RLM Simples      │ %8.4f │ %8.4f │ %8.4f │ %6.1fms │\n",
+                            metricsRLM.rmse, metricsRLM.mae, metricsRLM.r2, metricsRLM.timeMs));
+                    resultado.append(String.format("│ RLM + Bagging    │ %8.4f │ %8.4f │ %8.4f │ %6.1fms │\n",
+                            metricsBag.rmse, metricsBag.mae, metricsBag.r2, metricsBag.timeMs));
+                    resultado.append(String.format("│ RLM + Subagging  │ %8.4f │ %8.4f │ %8.4f │ %6.1fms │\n",
+                            metricsSub.rmse, metricsSub.mae, metricsSub.r2, metricsSub.timeMs));
+                    resultado.append("└──────────────────┴──────────┴──────────┴──────────┴─────────┘\n\n");
+
+                    // Análise final: destaca o melhor em cada critério
+                    resultado.append("┌─────────────────────────────────────────────────────────────┐\n");
+                    resultado.append("│                      ANÁLISE FINAL                          │\n");
+                    resultado.append("└─────────────────────────────────────────────────────────────┘\n");
+
+                    double menorRMSE = Math.min(metricsRLM.rmse, Math.min(metricsBag.rmse, metricsSub.rmse));
+                    String melhorRMSE = (menorRMSE == metricsRLM.rmse) ? "RLM Simples" :
+                            (menorRMSE == metricsBag.rmse) ? "RLM + Bagging" : "RLM + Subagging";
+                    resultado.append(String.format("✅ Menor RMSE: %s (%.4f)\n", melhorRMSE, menorRMSE));
+
+                    double maiorR2 = Math.max(metricsRLM.r2, Math.max(metricsBag.r2, metricsSub.r2));
+                    String melhorR2 = (maiorR2 == metricsRLM.r2) ? "RLM Simples" :
+                            (maiorR2 == metricsBag.r2) ? "RLM + Bagging" : "RLM + Subagging";
+                    resultado.append(String.format("✅ Maior R²: %s (%.4f)\n", melhorR2, maiorR2));
+
+                    double menorTempo = Math.min(metricsRLM.timeMs, Math.min(metricsBag.timeMs, metricsSub.timeMs));
+                    String maisRapido = (menorTempo == metricsRLM.timeMs) ? "RLM Simples" :
+                            (menorTempo == metricsBag.timeMs) ? "RLM + Bagging" : "RLM + Subagging";
+                    resultado.append(String.format("✅ Mais rápido: %s (%.2f ms)\n\n", maisRapido, menorTempo));
+
+                    resultado.append("════════════════════════════════════════════════════════════════\n");
+                    resultado.append("✓ Análise concluída com protocolo metodologicamente correto!\n");
+                    resultado.append("════════════════════════════════════════════════════════════════\n");
+
+                    // Salva o relatório em arquivo .txt com timestamp
+                    String nomeArquivo = salvarResultados(resultado.toString());
+                    resultado.append(String.format("\n💾 Resultados salvos em: %s\n", nomeArquivo));
+
+                    // Abre os gráficos na EDT após a conclusão do processamento
+                    SwingUtilities.invokeLater(() -> {
+                        plotComparison(Yteste, YpredRLM, "RLM Simples");
+                        plotComparison(Yteste, YpredBag,
+                                String.format("RLM + Bagging (m*=%d)", optParams.mBagging));
+                        plotComparison(Yteste, YpredSub,
+                                String.format("RLM + Subagging (k*=%.0f%%, m*=%d)",
+                                        optParams.kSubagging * 100, optParams.mSubagging));
+                    });
+
+                } catch (Exception e) {
+                    resultado.append("\n❌ ERRO: ").append(e.getMessage());
+                    e.printStackTrace();
+                }
+
+                return resultado.toString();
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    txtResultados.setText(get());
+                } catch (Exception e) {
+                    txtResultados.setText("❌ Erro ao processar: " + e.getMessage());
+                }
+                btnExecutar.setEnabled(true);
+            }
+        }.execute();
+    }
+
+    // ========================================================================
+    // MÉTODOS AUXILIARES – CÁLCULO E MODELAGEM
+    // ========================================================================
+
+    /**
+     * Extrai um subconjunto de linhas de uma matriz, dado uma lista de índices.
+     *
+     * @param matrix  matriz de origem
+     * @param indices lista de índices das linhas a extrair
+     * @return nova {@link SimpleMatrix} contendo apenas as linhas selecionadas,
+     *         na mesma ordem da lista {@code indices}
+     */
+    private SimpleMatrix extractRows(SimpleMatrix matrix, List<Integer> indices) {
+        SimpleMatrix result = new SimpleMatrix(indices.size(), matrix.numCols());
+        for (int i = 0; i < indices.size(); i++) {
+            for (int j = 0; j < matrix.numCols(); j++) {
+                result.set(i, j, matrix.get(indices.get(i), j));
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Calcula o desvio padrão populacional de uma lista de valores Double.
+     *
+     * @param values lista de valores
+     * @param mean   média previamente calculada da lista
+     * @return desvio padrão populacional (divisão por {@code n})
+     */
+    private double calculateStdDev(List<Double> values, double mean) {
+        double sum = 0.0;
+        for (double val : values) {
+            sum += Math.pow(val - mean, 2);
+        }
+        return Math.sqrt(sum / values.size());
+    }
+
+    /**
+     * Calcula o RMSE (Root Mean Squared Error) entre os vetores de valores
+     * reais e preditos.
+     *
+     * <p>Fórmula: {@code RMSE = ||predicted - actual||_F / sqrt(n)}</p>
+     *
+     * @param actual    vetor com os valores reais (n × 1)
+     * @param predicted vetor com os valores preditos (n × 1)
+     * @return valor do RMSE
+     */
+    private double calculateRMSE(SimpleMatrix actual, SimpleMatrix predicted) {
+        SimpleMatrix error = predicted.minus(actual);
+        return error.normF() / Math.sqrt(error.numRows());
+    }
+
+    /**
+     * Calcula o conjunto completo de métricas de avaliação (RMSE, MAE, R²)
+     * e converte o tempo de execução de nanosegundos para milissegundos.
+     *
+     * @param actual    vetor com os valores reais (n × 1)
+     * @param predicted vetor com os valores preditos (n × 1)
+     * @param nanoTime  tempo de execução em nanosegundos (obtido via {@link System#nanoTime()})
+     * @return {@link FinalMetrics} com todas as métricas calculadas
+     */
+    private FinalMetrics calculateMetrics(SimpleMatrix actual, SimpleMatrix predicted, long nanoTime) {
+        double rmse   = calculateRMSE(actual, predicted);
+        double mae    = calculateMAE(actual, predicted);
+        double r2     = calculateR2(actual, predicted);
+        double timeMs = nanoTime / 1_000_000.0;
+        return new FinalMetrics(rmse, mae, r2, timeMs);
+    }
+
+    /**
+     * Executa a Regressão Linear Múltipla (RLM) simples, sem ensemble.
+     *
+     * <p>Calcula os coeficientes via pseudoinversa:
+     * {@code b = pinv(Xcal) × Ycal}, e retorna a predição
+     * {@code Ypred = Xteste × b}.</p>
+     *
+     * @param Xcal   matriz de calibração (n_cal × p)
+     * @param Ycal   vetor de resposta de calibração (n_cal × 1)
+     * @param Xteste matriz de teste (n_test × p)
+     * @return vetor de predições (n_test × 1)
+     */
+    private SimpleMatrix performRLM(SimpleMatrix Xcal, SimpleMatrix Ycal, SimpleMatrix Xteste) {
+        SimpleMatrix b = pseudoInverse(Xcal).mult(Ycal);
+        return Xteste.mult(b);
+    }
+
+    /**
+     * Executa o ensemble de Bagging ou Subagging sobre o conjunto de calibração
+     * e retorna as predições agregadas para o conjunto de teste.
+     *
+     * <p>Para cada um dos {@code numBags} modelos:</p>
+     * <ol>
+     *   <li>Uma amostra bootstrap é gerada (com ou sem reposição, conforme
+     *       {@code withReplacement}).</li>
+     *   <li>Um modelo RLM é ajustado via pseudoinversa sobre a amostra.</li>
+     *   <li>A predição do modelo é acumulada com peso {@code 1/numBags}.</li>
+     * </ol>
+     * <p>A predição final é a média aritmética das predições individuais.</p>
+     *
+     * @param Xcal             matriz de calibração (n × p)
+     * @param Ycal             vetor de resposta de calibração (n × 1)
+     * @param Xteste           matriz de teste (n_test × p)
+     * @param numBags          número de modelos base (bags) a gerar
+     * @param withReplacement  {@code true} para Bagging (com reposição),
+     *                         {@code false} para Subagging (sem reposição)
+     * @param sampleFraction   fração da amostra a usar por bag;
+     *                         ignorada quando {@code withReplacement = true} (usa {@code n} completo)
+     * @return vetor de predições agregadas (n_test × 1)
+     */
+    private SimpleMatrix performBagging(SimpleMatrix Xcal, SimpleMatrix Ycal, SimpleMatrix Xteste,
+                                        int numBags, boolean withReplacement, double sampleFraction) {
+        int n          = Xcal.numRows();
+        int sampleSize = withReplacement ? n : (int) (n * sampleFraction);
+        List<SimpleMatrix> models = new ArrayList<>();
+        Random rand = new Random(42); // semente fixa para reprodutibilidade
+
+        for (int bag = 0; bag < numBags; bag++) {
+            SimpleMatrix Xbag = new SimpleMatrix(sampleSize, Xcal.numCols());
+            SimpleMatrix Ybag = new SimpleMatrix(sampleSize, 1);
+
+            if (withReplacement) {
+                // Bagging: amostragem com reposição (bootstrap completo)
+                for (int i = 0; i < sampleSize; i++) {
+                    int idx = rand.nextInt(n);
+                    copyRow(Xcal, idx, Xbag, i);
+                    Ybag.set(i, 0, Ycal.get(idx, 0));
+                }
+            } else {
+                // Subagging: amostragem sem reposição (subconjunto aleatório)
+                List<Integer> indices = new ArrayList<>();
+                for (int i = 0; i < n; i++) indices.add(i);
+                Collections.shuffle(indices, rand);
+                for (int i = 0; i < sampleSize; i++) {
+                    int idx = indices.get(i);
+                    copyRow(Xcal, idx, Xbag, i);
+                    Ybag.set(i, 0, Ycal.get(idx, 0));
+                }
+            }
+
+            // Ajusta o modelo RLM para esta amostra bootstrap
+            SimpleMatrix b_bag = pseudoInverse(Xbag).mult(Ybag);
+            models.add(b_bag);
+        }
+
+        // Agrega as predições de todos os modelos pela média aritmética
+        SimpleMatrix Ypred = new SimpleMatrix(Xteste.numRows(), 1);
+        for (SimpleMatrix b : models) {
+            SimpleMatrix pred = Xteste.mult(b);
+            Ypred = Ypred.plus(pred.scale(1.0 / numBags));
+        }
+        return Ypred;
+    }
+
+    // ========================================================================
+    // MÉTODOS AUXILIARES – IO E PERSISTÊNCIA
+    // ========================================================================
+
+    /**
+     * Salva o conteúdo do relatório de resultados em um arquivo de texto
+     * com nome gerado automaticamente a partir do timestamp corrente.
+     *
+     * <p>O arquivo é criado no diretório de trabalho da JVM com o formato:
+     * {@code Resultados_Otimizados_yyyyMMdd_HHmmss.txt}.</p>
+     *
+     * @param conteudo string com todo o conteúdo a ser gravado no arquivo
+     * @return nome do arquivo criado
+     * @throws IOException se ocorrer erro de escrita no sistema de arquivos
+     */
+    private String salvarResultados(String conteudo) throws IOException {
+        String timestamp   = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+        String nomeArquivo = "Resultados_Otimizados_" + timestamp + ".txt";
+
+        try (PrintWriter writer = new PrintWriter(new FileWriter(nomeArquivo))) {
+            writer.println(conteudo);
+        }
+
+        return nomeArquivo;
+    }
+
+    /**
+     * Copia uma linha inteira de uma matriz de origem para uma linha de destino.
+     *
+     * @param src     matriz de origem
+     * @param srcRow  índice da linha na matriz de origem
+     * @param dest    matriz de destino
+     * @param destRow índice da linha na matriz de destino
+     */
+    private void copyRow(SimpleMatrix src, int srcRow, SimpleMatrix dest, int destRow) {
+        double[] rowData = new double[src.numCols()];
+        for (int j = 0; j < src.numCols(); j++) {
+            rowData[j] = src.get(srcRow, j);
+        }
+        dest.setRow(destRow, 0, rowData);
+    }
+
+    /**
+     * Detecta automaticamente as dimensões (linhas × colunas) de um arquivo
+     * de texto contendo uma matriz numérica.
+     *
+     * <p>Cada linha do arquivo corresponde a uma amostra; os valores dentro
+     * de cada linha devem estar separados por espaços ou tabulações.</p>
+     *
+     * @param file arquivo de texto com a matriz
+     * @return array {@code int[2]} onde {@code [0]} = número de linhas e
+     *         {@code [1]} = número de colunas
+     * @throws IOException           se ocorrer erro de leitura
+     * @throws NumberFormatException se algum token não puder ser convertido para double
+     */
+    private int[] detectarDimensoes(File file) throws IOException {
+        List<Double> data = new ArrayList<>();
+        int linhas = 0;
+
+        try (BufferedReader br = new BufferedReader(new FileReader(file))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                String[] tokens = line.trim().split("\\s+");
+                for (String token : tokens) {
+                    if (!token.isEmpty()) {
+                        data.add(Double.parseDouble(token));
+                    }
+                }
+                if (tokens.length > 0) linhas++;
+            }
+        }
+
+        int colunas = data.size() / linhas;
+        return new int[]{linhas, colunas};
+    }
+
+    /**
+     * Conta o número de linhas de um arquivo de texto.
+     *
+     * @param file arquivo a ser lido
+     * @return número total de linhas do arquivo
+     * @throws IOException se ocorrer erro de leitura
+     */
+    private int contarLinhas(File file) throws IOException {
+        int count = 0;
+        try (BufferedReader br = new BufferedReader(new FileReader(file))) {
+            while (br.readLine() != null) count++;
+        }
+        return count;
+    }
+
+    // ========================================================================
+    // MÉTODOS AUXILIARES – VISUALIZAÇÃO
+    // ========================================================================
+
+    /**
+     * Gera e exibe uma janela com o gráfico de linhas comparando os valores
+     * reais do conjunto de teste com os valores preditos pelo modelo.
+     *
+     * <p>O eixo X representa o índice da amostra (1 a n); o eixo Y representa
+     * o valor de concentração. A série real é exibida em azul e a predita em vermelho.</p>
+     *
+     * @param yteste vetor com os valores reais de teste (n × 1)
+     * @param ypred  vetor com os valores preditos pelo modelo (n × 1)
+     * @param method string descritiva do método exibido no título do gráfico
+     */
+    private void plotComparison(SimpleMatrix yteste, SimpleMatrix ypred, String method) {
+        XYSeries serieReal    = new XYSeries("Referência (Real)");
+        XYSeries seriePredita = new XYSeries("Predito");
+
+        for (int i = 0; i < yteste.numRows(); i++) {
+            int amostra = i + 1;
+            serieReal.add(amostra, yteste.get(i, 0));
+            seriePredita.add(amostra, ypred.get(i, 0));
+        }
+
+        XYSeriesCollection dataset = new XYSeriesCollection();
+        dataset.addSeries(serieReal);
+        dataset.addSeries(seriePredita);
+
+        JFreeChart chart = ChartFactory.createXYLineChart(
+                "Comparação: Valores Reais vs Preditos - " + method,
+                "Número da Amostra",
+                "Concentração",
+                dataset,
+                PlotOrientation.VERTICAL,
+                true, true, false
+        );
+
+        XYPlot plot = chart.getXYPlot();
+        XYLineAndShapeRenderer renderer = new XYLineAndShapeRenderer();
+
+        // Série real: linha azul com marcadores
+        renderer.setSeriesPaint(0, Color.BLUE);
+        renderer.setSeriesStroke(0, new BasicStroke(2.0f));
+        renderer.setSeriesShapesVisible(0, true);
+
+        // Série predita: linha vermelha com marcadores
+        renderer.setSeriesPaint(1, Color.RED);
+        renderer.setSeriesStroke(1, new BasicStroke(2.0f));
+        renderer.setSeriesShapesVisible(1, true);
+
+        plot.setRenderer(renderer);
+        plot.setBackgroundPaint(Color.WHITE);
+        plot.setRangeGridlinePaint(Color.GRAY);
+        plot.setDomainGridlinePaint(Color.GRAY);
+
+        JFrame frameGrafico = new JFrame("Gráfico - " + method);
+        frameGrafico.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
+        ChartPanel chartPanel = new ChartPanel(chart);
+        chartPanel.setPreferredSize(new Dimension(1000, 600));
+        frameGrafico.add(chartPanel);
+        frameGrafico.pack();
+        frameGrafico.setLocationRelativeTo(this);
+        frameGrafico.setVisible(true);
+    }
+
+    // ========================================================================
+    // MÉTODOS ESTÁTICOS – OPERAÇÕES MATRICIAIS E MÉTRICAS
+    // ========================================================================
+
+    /**
+     * Calcula a pseudoinversa de Moore-Penrose de uma matriz usando a
+     * implementação fornecida pela biblioteca EJML.
+     *
+     * @param matrix matriz de entrada (m × n)
+     * @return pseudoinversa da matriz (n × m)
+     */
+    private static SimpleMatrix pseudoInverse(SimpleMatrix matrix) {
+        return matrix.pseudoInverse();
+    }
+
+    /**
+     * Calcula o MAE (Mean Absolute Error) entre os vetores de valores
+     * reais e preditos.
+     *
+     * <p>Fórmula: {@code MAE = (1/n) × Σ |actual_i - predicted_i|}</p>
+     *
+     * @param actual    vetor com os valores reais (n × 1)
+     * @param predicted vetor com os valores preditos (n × 1)
+     * @return valor do MAE
+     */
+    private static double calculateMAE(SimpleMatrix actual, SimpleMatrix predicted) {
+        double sum = 0;
+        for (int i = 0; i < actual.numRows(); i++) {
+            sum += Math.abs(actual.get(i, 0) - predicted.get(i, 0));
+        }
+        return sum / actual.numRows();
+    }
+
+    /**
+     * Calcula o coeficiente de determinação R² entre os vetores de valores
+     * reais e preditos.
+     *
+     * <p>Fórmula: {@code R² = 1 - SS_res / SS_tot}, onde
+     * {@code SS_res = Σ(actual - predicted)²} e
+     * {@code SS_tot = Σ(actual - mean(actual))²}.</p>
+     *
+     * @param actual    vetor com os valores reais (n × 1)
+     * @param predicted vetor com os valores preditos (n × 1)
+     * @return valor de R² (1.0 indica ajuste perfeito; valores negativos indicam
+     *         modelo pior que a média)
+     */
+    private static double calculateR2(SimpleMatrix actual, SimpleMatrix predicted) {
+        double meanActual = 0;
+        for (int i = 0; i < actual.numRows(); i++) {
+            meanActual += actual.get(i, 0);
+        }
+        meanActual /= actual.numRows();
+
+        double ssTotal = 0;
+        double ssRes   = 0;
+        for (int i = 0; i < actual.numRows(); i++) {
+            double actualVal = actual.get(i, 0);
+            double predVal   = predicted.get(i, 0);
+            ssTotal += Math.pow(actualVal - meanActual, 2);
+            ssRes   += Math.pow(actualVal - predVal,   2);
+        }
+
+        return 1 - (ssRes / ssTotal);
+    }
+
+    /**
+     * Carrega um vetor coluna de um arquivo de texto, onde cada linha contém
+     * um único valor numérico de ponto flutuante.
+     *
+     * @param filename caminho absoluto do arquivo
+     * @param rows     número esperado de valores (linhas)
+     * @return {@link SimpleMatrix} de dimensão (rows × 1) com os valores lidos
+     * @throws IOException              se ocorrer erro de leitura do arquivo
+     * @throws IllegalArgumentException se o número de valores lidos diferir de {@code rows}
+     */
+    private static SimpleMatrix loadVectorFromFile(String filename, int rows) throws IOException {
+        List<Double> data = new ArrayList<>();
+        try (BufferedReader br = new BufferedReader(new FileReader(filename))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                line = line.trim();
+                if (!line.isEmpty()) {
+                    data.add(Double.parseDouble(line));
+                }
+            }
+        }
+        if (data.size() != rows) {
+            throw new IllegalArgumentException("Esperado " + rows + " linhas em " + filename);
+        }
+        double[][] array = new double[rows][1];
+        for (int i = 0; i < rows; i++) {
+            array[i][0] = data.get(i);
+        }
+        return new SimpleMatrix(array);
+    }
+
+    /**
+     * Carrega uma matriz de um arquivo de texto, onde os valores são separados
+     * por espaços ou tabulações e cada linha corresponde a uma amostra.
+     *
+     * @param filename caminho absoluto do arquivo
+     * @param rows     número de linhas (amostras) esperado
+     * @param cols     número de colunas (variáveis) esperado
+     * @return {@link SimpleMatrix} de dimensão (rows × cols) com os valores lidos
+     * @throws IOException              se ocorrer erro de leitura do arquivo
+     * @throws IllegalArgumentException se o número total de valores lidos diferir
+     *                                  de {@code rows × cols}
+     */
+    private static SimpleMatrix loadMatrixFromFile(String filename, int rows, int cols) throws IOException {
+        List<Double> data = new ArrayList<>();
+        try (BufferedReader br = new BufferedReader(new FileReader(filename))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                String[] tokens = line.trim().split("\\s+");
+                for (String token : tokens) {
+                    if (!token.isEmpty()) {
+                        data.add(Double.parseDouble(token));
+                    }
+                }
+            }
+        }
+        if (data.size() != rows * cols) {
+            throw new IllegalArgumentException("Esperado " + (rows * cols) + " valores em " + filename +
+                    ", encontrado " + data.size());
+        }
+        double[][] array = new double[rows][cols];
+        int idx = 0;
+        for (int i = 0; i < rows; i++) {
+            for (int j = 0; j < cols; j++) {
+                array[i][j] = data.get(idx++);
+            }
+        }
+        return new SimpleMatrix(array);
+    }
+
+    // ========================================================================
+    // INTERFACE FUNCIONAL AUXILIAR
+    // ========================================================================
+
+    /**
+     * Interface funcional (callback) utilizada para receber o {@link File}
+     * selecionado pelo usuário no {@link JFileChooser}.
+     *
+     * <p>Substitui {@code Consumer<File>} para evitar dependência de
+     * {@code java.util.function} e manter compatibilidade com lambdas.</p>
+     *
+     * @author Wagner Oliveira de Araujo
+     * @version 1.1
+     */
+    private interface FileConsumer {
+
+        /**
+         * Processa o arquivo selecionado pelo usuário.
+         *
+         * @param file arquivo selecionado via {@link JFileChooser}
+         */
+        void accept(File file);
+    }
+
+    // ========================================================================
+    // PONTO DE ENTRADA
+    // ========================================================================
+
+    /**
+     * Método principal que inicializa a aplicação na EDT
+     * ({@link SwingUtilities#invokeLater}).
+     *
+     * @param args argumentos de linha de comando (não utilizados)
+     */
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                new BaggingOptimized().setVisible(true);
+            }
+        });
+    }
+}
+//versao: 3.0 - 
